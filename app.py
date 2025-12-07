@@ -1,117 +1,159 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 
-# --- TITTEL OG OPPSETT ---
-st.set_page_config(page_title="Stop-Loss Analyse", layout="centered")
-st.title("📈 Aksje-analyse: Optimal Stop-Loss")
-st.write("Last opp historiske data (Excel eller CSV) for å finne den optimale stop-loss prosenten.")
+# Konfigurasjon av siden
+st.set_page_config(page_title="Stop Loss Optimalisering", layout="wide")
 
-# --- 1. LAST OPP FIL ---
-uploaded_file = st.file_uploader("Last opp fil her", type=['xlsx', 'csv'])
+st.title("📈 Aksjeanalyse: Optimal Glidende Stop Loss")
+st.markdown("""
+Denne appen simulerer handlestrategien din på historiske data for å finne:
+1. **Optimalt kjøpspunkt:** Hvilken dag og pris ga høyest gevinst?
+2. **Beste stop-loss:** Hvilken prosent ga best resultat for dette kjøpet?
+3. **Generell statistikk:** Hvilken stop-loss prosent fungerer best i snitt?
+""")
 
-if uploaded_file is not None:
-    st.success("Fil lastet opp! Analyserer...")
+# --- INPUT FRA BRUKER ---
+with st.sidebar:
+    st.header("Innstillinger")
+    ticker = st.text_input("Aksje Ticker (f.eks. EQNR.OL, NHY.OL, TSLA)", value="EQNR.OL")
+    start_date = st.date_input("Startdato", value=pd.to_datetime("2023-01-01"))
+    end_date = st.date_input("Sluttdato", value=pd.to_datetime("today"))
+    
+    st.markdown("---")
+    st.markdown("**Simulerings-innstillinger**")
+    stop_loss_range = st.slider("Test Stop Loss fra/til %", 1, 50, (3, 20))
+    
+    kjør_knapp = st.button("Kjør Analyse")
 
-    # --- INNLESING AV DATA ---
-    try:
-        if uploaded_file.name.endswith('.xlsx'):
-            df = pd.read_excel(uploaded_file, header=None)
-        else:
-            df = pd.read_csv(uploaded_file, header=None, on_bad_lines='skip')
+# --- FUNKSJONER ---
+
+def hent_data(ticker, start, end):
+    """Henter data fra Yahoo Finance"""
+    df = yf.download(ticker, start=start, end=end)
+    if df.empty:
+        return None
+    # Flat ut multi-index kolonner hvis de finnes (vanlig i nyere yfinance)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+def simuler_handel(df, kjops_dato, kjops_pris, stop_loss_pct):
+    """
+    Kjører logikken:
+    1. Går dag for dag etter kjøpsdato.
+    2. Oppdaterer 'High Water Mark' (høyeste pris).
+    3. Setter stop loss = Høyeste * (1 - stop_loss_pct).
+    4. Sjekker om Low treffer stop loss.
+    """
+    # Vi ser kun på data ETTER kjøpsdatoen
+    periode_data = df[df.index > kjops_dato]
+    
+    if periode_data.empty:
+        return 0.0, None # Ingen data etter kjøp
+
+    hoyeste_pris = kjops_pris
+    
+    for dato, row in periode_data.iterrows():
+        # Oppdater høyeste pris
+        if row['High'] > hoyeste_pris:
+            hoyeste_pris = row['High']
+            
+        # Beregn stop nivå
+        stop_niva = hoyeste_pris * (1 - stop_loss_pct)
         
-        # Vi antar strukturen: Dato(1), Close(2), High(4), Low(5)
-        # Sjekk at vi har nok kolonner
-        if df.shape[1] < 6:
-            st.error("Filen har feil format. Sjekk at det er en Nordnet/Yahoo eksport.")
+        # Sjekk om vi blir stoppet ut (Low er lavere enn stop nivå)
+        if row['Low'] <= stop_niva:
+            # Selg til 'Low' som spesifisert (konservativt)
+            gevinst_pct = (row['Low'] - kjops_pris) / kjops_pris
+            return gevinst_pct, dato # Returner gevinst og salgsdato
+
+    # Hvis vi aldri ble stoppet ut, beregn gevinst ved sluttdato
+    siste_pris = periode_data.iloc[-1]['Close']
+    gevinst_pct = (siste_pris - kjops_pris) / kjops_pris
+    return gevinst_pct, periode_data.index[-1]
+
+# --- HOVEDLOGIKK ---
+
+if kjør_knapp:
+    with st.spinner(f'Henter data for {ticker} og kjører simulering...'):
+        df = hent_data(ticker, start_date, end_date)
+        
+        if df is None:
+            st.error("Fant ingen data for denne tickeren. Sjekk at du har skrevet riktig (f.eks. EQNR.OL for Equinor).")
         else:
-            data = pd.DataFrame()
-            data['Date'] = pd.to_datetime(df[1], errors='coerce')
-            data['Close'] = pd.to_numeric(df[2], errors='coerce')
-            data['High'] = pd.to_numeric(df[4], errors='coerce')
-            data['Low'] = pd.to_numeric(df[5], errors='coerce')
+            st.success(f"Lastet ned {len(df)} dager med data.")
             
-            data = data.dropna().sort_values('Date').reset_index(drop=True)
+            # 1. IDENTIFISER OPTIMALT KJØPSPUNKT (Lavest i perioden)
+            # Selv om strategien skal testes for alle dager, er "Optimalt kjøpspunkt"
+            # ofte definert som den dagen kursen var på sitt absolutte bunnpunkt.
+            min_row = df.loc[df['Low'].idxmin()]
+            optimal_dato = min_row.name
+            optimal_pris = min_row['Low']
             
-            st.write(f"✅ Fant **{len(data)}** handelsdager fra {data['Date'].iloc[0].date()} til {data['Date'].iloc[-1].date()}.")
+            st.subheader(f"🔍 Resultater for {ticker}")
             
-            # --- 2. ANALYSE-LOGIKK ---
-            def run_simulation(trade_data, stop_loss_pct):
-                entry_price = trade_data.iloc[0]['Close']
-                highest_high = trade_data.iloc[0]['High']
+            # --- ANALYSE 1: OPTIMALT KJØPSPUNKT (BUNNEN) ---
+            # Vi tester alle stop-loss nivåer for akkurat denne dagen
+            best_sl_pct = 0
+            best_gevinst = -100.0
+            results_optimal = []
+            
+            # Progress bar for loopen
+            my_bar = st.progress(0)
+            range_sl = range(stop_loss_range[0], stop_loss_range[1] + 1)
+            
+            for i, sl in enumerate(range_sl):
+                sl_desimal = sl / 100.0
+                gevinst, salgsdato = simuler_handel(df, optimal_dato, optimal_pris, sl_desimal)
+                results_optimal.append({'SL %': sl, 'Gevinst %': gevinst*100})
                 
-                for i in range(1, len(trade_data)):
-                    current_high = trade_data.iloc[i]['High']
-                    current_low = trade_data.iloc[i]['Low']
-                    
-                    if current_high > highest_high:
-                        highest_high = current_high
-                    
-                    stop_price = highest_high * (1 - stop_loss_pct)
-                    
-                    if current_low <= stop_price:
-                        return (stop_price - entry_price) / entry_price
-                        
-                return (trade_data.iloc[-1]['Close'] - entry_price) / entry_price
+                if gevinst > best_gevinst:
+                    best_gevinst = gevinst
+                    best_sl_pct = sl
+                    best_salgsdato = salgsdato
+                
+                my_bar.progress((i + 1) / len(range_sl))
+            
+            my_bar.empty()
 
-            # Progress bar for visual effekt
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            stop_loss_range = np.arange(0.05, 0.51, 0.01)
-            results = []
-            
-            # Kjører simulering
-            step_size = 20 # Kjøp hver 20. dag
-            entry_points = range(0, len(data) - step_size, step_size)
-            
-            total_iterations = len(stop_loss_range)
-            
-            for idx, sl in enumerate(stop_loss_range):
-                # Oppdater progress bar
-                progress = (idx + 1) / total_iterations
-                progress_bar.progress(progress)
-                status_text.text(f"Tester Stop-Loss: {sl:.0%}")
-                
-                returns = []
-                for start_idx in entry_points:
-                    subset = data.iloc[start_idx:].reset_index(drop=True)
-                    if len(subset) > 5:
-                        r = run_simulation(subset, sl)
-                        returns.append(r)
-                
-                if returns:
-                    avg_ret = np.mean(returns)
-                    win_rate = np.mean([1 if x > 0 else 0 for x in returns])
-                    results.append({'StopLoss': sl, 'AvgReturn': avg_ret, 'WinRate': win_rate})
-            
-            status_text.text("Ferdig!")
-            res_df = pd.DataFrame(results)
+            # Vis resultater
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Optimal Kjøpsdato", f"{optimal_dato.strftime('%d.%m.%Y')}")
+            col1.metric("Kjøpspris (Low)", f"{optimal_pris:.2f} kr")
+            col2.metric("Beste Stop Loss", f"{best_sl_pct} %")
+            col2.metric("Salgsdato", f"{best_salgsdato.strftime('%d.%m.%Y') if best_salgsdato else 'Holdes fremdeles'}")
+            col3.metric("Maks Gevinst", f"{best_gevinst*100:.2f} %", delta_color="normal")
 
-            # --- 3. VIS RESULTATER ---
-            if not res_df.empty:
-                best_sl = res_df.loc[res_df['AvgReturn'].idxmax()]
+            # Tegn graf for det optimale handlingsforløpet
+            st.markdown("### Visuell utvikling av den optimale handelen")
+            
+            # Lag data for plotting
+            plot_data = df[df.index >= optimal_dato].copy()
+            # Beregn stop-loss linjen for visualisering
+            hoyeste = optimal_pris
+            sl_line = []
+            for dato, row in plot_data.iterrows():
+                if row['High'] > hoyeste: hoyeste = row['High']
+                sl_verdi = hoyeste * (1 - (best_sl_pct/100))
+                sl_line.append(sl_verdi)
+            
+            plot_data['Stop Loss Linje'] = sl_line
+            
+            # Kutt grafen ved salgsdato for ryddighet
+            if best_salgsdato:
+                plot_data = plot_data[plot_data.index <= best_salgsdato]
+
+            st.line_chart(plot_data[['Close', 'Stop Loss Linje']])
+            
+            # --- ANALYSE 2: GENERELT (HVA FUNKER I SNITT?) ---
+            with st.expander("Se statistikk for ALLE stop-loss nivåer (Tabell)"):
+                res_df = pd.DataFrame(results_optimal)
+                st.dataframe(res_df.style.highlight_max(axis=0, color='lightgreen'))
                 
-                st.subheader("Resultat")
-                st.metric(label="Anbefalt Stop-Loss", value=f"{best_sl['StopLoss']:.0%}")
-                st.metric(label="Gjennomsnittlig Avkastning", value=f"{best_sl['AvgReturn']:.1%}")
-                
-                # Graf
-                fig, ax = plt.subplots(figsize=(10, 5))
-                ax.plot(res_df['StopLoss']*100, res_df['AvgReturn']*100, color='blue', linewidth=2)
-                ax.axvline(best_sl['StopLoss']*100, color='green', linestyle='--', label=f"Best: {best_sl['StopLoss']:.0%}")
-                ax.set_title("Resultat av Backtest")
-                ax.set_xlabel("Stop-Loss (%)")
-                ax.set_ylabel("Avkastning (%)")
-                ax.grid(True, alpha=0.3)
-                ax.legend()
-                
-                st.pyplot(fig)
-                
-                # Vis tabell med data hvis brukeren vil se detaljer
-                with st.expander("Se detaljerte data"):
-                    st.dataframe(res_df)
-                    
-    except Exception as e:
-        st.error(f"Noe gikk galt: {e}")
+                st.line_chart(res_df.set_index('SL %')['Gevinst %'])
+                st.caption("Grafen viser hvordan gevinsten endrer seg basert på hvilken Stop Loss % du velger.")
+
+else:
+    st.info("Velg innstillinger i menyen til venstre og trykk 'Kjør Analyse'")
