@@ -24,7 +24,7 @@ start_date = st.date_input("Startdato", value=pd.to_datetime("today") - pd.DateO
     
     st.markdown("---")
     st.markdown("**Simulerings-innstillinger**")
-    stop_loss_range = st.slider("Test Stop Loss fra/til %", 1, 90, (3, 20))
+    stop_loss_range = st.slider("Test Stop Loss fra/til %", 1, 90, (3, 50))
     
     kjør_knapp = st.button("Kjør Analyse")
 
