@@ -18,12 +18,13 @@ Denne appen simulerer handlestrategien din på historiske data for å finne:
 with st.sidebar:
     st.header("Innstillinger")
     ticker = st.text_input("Aksje Ticker (f.eks. EQNR.OL, NHY.OL, TSLA)", value="EQNR.OL")
-    start_date = st.date_input("Startdato", value=pd.to_datetime("2023-01-01"))
+# Bruker dagens dato minus 12 måneder (pd.DateOffset) som standard startdato
+start_date = st.date_input("Startdato", value=pd.to_datetime("today") - pd.DateOffset(years=1))
     end_date = st.date_input("Sluttdato", value=pd.to_datetime("today"))
     
     st.markdown("---")
     st.markdown("**Simulerings-innstillinger**")
-    stop_loss_range = st.slider("Test Stop Loss fra/til %", 1, 50, (3, 20))
+    stop_loss_range = st.slider("Test Stop Loss fra/til %", 1, 90, (3, 20))
     
     kjør_knapp = st.button("Kjør Analyse")
 
