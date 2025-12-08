@@ -41,7 +41,6 @@ def hent_data(ticker, start, end):
             return None
         
         # Håndtering av MultiIndex kolonner (vanlig i nyere yfinance versjoner)
-        # Hvis kolonnene ser slik ut: ('Close', 'EQNR.OL'), flater vi dem ut
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
@@ -53,10 +52,6 @@ def hent_data(ticker, start, end):
 def simuler_handel(df, kjops_dato, kjops_pris, stop_loss_pct):
     """
     Kjører logikken for 'Trailing Stop Loss':
-    1. Går dag for dag etter kjøpsdato.
-    2. Oppdaterer 'High Water Mark' (høyeste pris observert siden kjøp).
-    3. Setter stop loss = Høyeste * (1 - stop_loss_pct).
-    4. Sjekker om Low treffer stop loss.
     """
     # Vi ser kun på data ETTER kjøpsdatoen
     periode_data = df[df.index > kjops_dato].copy()
@@ -76,7 +71,69 @@ def simuler_handel(df, kjops_dato, kjops_pris, stop_loss_pct):
         
         # Sjekk om vi blir stoppet ut (Low er lavere enn stop nivå)
         if row['Low'] <= stop_niva:
-            # Vi antar vi selger på Stop-nivået (eller Low hvis gap-down)
-            # For å være konservativ bruker vi ofte stop-nivået, men her bruker du Low/beregning.
-            # En enkel tilnærming er å selge på stop_niva, men hvis åpning er lavere, selger vi på Open.
-            # Koden din bruker (Low - kjø
+            # Vi selger når stop-loss treffes
+            salgspris = stop_niva 
+            gevinst_pct = (salgspris - kjops_pris) / kjops_pris
+            return gevinst_pct, dato # Returner gevinst og salgsdato
+
+    # Hvis vi aldri ble stoppet ut, beregn gevinst ved sluttdato (papirgevinst)
+    siste_pris = periode_data.iloc[-1]['Close']
+    gevinst_pct = (siste_pris - kjops_pris) / kjops_pris
+    return gevinst_pct, periode_data.index[-1]
+
+# --- HOVEDLOGIKK ---
+
+if kjør_knapp:
+    with st.spinner(f'Henter data for {ticker} og kjører simulering...'):
+        df = hent_data(ticker, start_date, end_date)
+        
+        if df is None:
+            st.error("Fant ingen data for denne tickeren. Sjekk at du har skrevet riktig (f.eks. EQNR.OL for Equinor).")
+        else:
+            st.success(f"Lastet ned {len(df)} dager med data.")
+            
+            # 1. IDENTIFISER OPTIMALT KJØPSPUNKT (Lavest i perioden)
+            min_row = df.loc[df['Low'].idxmin()]
+            optimal_dato = min_row.name
+            optimal_pris = min_row['Low']
+            
+            st.subheader(f"🔍 Resultater for {ticker}")
+            st.write(f"Simuleringen antar at du traff den absolutte bunnen den **{optimal_dato.strftime('%d.%m.%Y')}** på kurs **{optimal_pris:.2f}**.")
+            
+            # --- ANALYSE: OPTIMALT KJØPSPUNKT ---
+            best_sl_pct = 0
+            best_gevinst = -100.0
+            best_salgsdato = None
+            results_optimal = []
+            
+            # Progress bar
+            my_bar = st.progress(0)
+            range_sl = range(stop_loss_range[0], stop_loss_range[1] + 1)
+            
+            for i, sl in enumerate(range_sl):
+                sl_desimal = sl / 100.0
+                gevinst, salgsdato = simuler_handel(df, optimal_dato, optimal_pris, sl_desimal)
+                results_optimal.append({'SL %': sl, 'Gevinst %': gevinst*100})
+                
+                if gevinst > best_gevinst:
+                    best_gevinst = gevinst
+                    best_sl_pct = sl
+                    best_salgsdato = salgsdato
+                
+                my_bar.progress((i + 1) / len(range_sl))
+            
+            my_bar.empty()
+
+            # Vis nøkkeltall
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Optimal Kjøpsdato", f"{optimal_dato.strftime('%d.%m.%Y')}")
+            col1.metric("Kjøpspris (Bunn)", f"{optimal_pris:.2f} kr")
+            
+            col2.metric("Beste Stop Loss", f"{best_sl_pct} %")
+            salgsdato_str = best_salgsdato.strftime('%d.%m.%Y') if best_salgsdato else 'Holdes fremdeles'
+            col2.metric("Salgsdato", salgsdato_str)
+            
+            col3.metric("Maks Gevinst", f"{best_gevinst*100:.2f} %", delta_color="normal")
+
+            # --- VISUALISERING ---
+            st.markdown("### Visuell utvikling av den optimale handelen
