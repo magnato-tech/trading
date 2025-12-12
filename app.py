@@ -8,7 +8,7 @@ import altair as alt
 st.set_page_config(page_title="Stop Loss Optimalisering", layout="wide")
 
 st.title("📈 Aksjeanalyse: Stop Loss Optimalisering")
-st.markdown("Her analyseres daglige bevegelser (OHLC). Simuleringen sjekker om **Dagens Laveste (Low)** treffer din Stop Loss.")
+st.markdown("Her analyseres daglige bevegelser (OHLC). Simuleringen sjekker om **Dagens Laveste (Low)** treffer din Stop Loss, og grafen vises for hele den oppsatte perioden.")
 
 # --- SIDEBAR (INPUT) ---
 with st.sidebar:
@@ -56,7 +56,6 @@ def simuler_handel(df, kjops_dato, kjops_pris, stop_loss_pct):
         stop_niva = hoyeste_pris * (1 - stop_loss_pct)
         
         # 3. Sjekk om vi blir stoppet ut (Low treffer stop loss)
-        # Dette fanger opp volatilitet i løpet av dagen
         if row['Low'] <= stop_niva:
             salgspris = stop_niva 
             gevinst = salgspris - kjops_pris
@@ -73,6 +72,7 @@ def simuler_handel(df, kjops_dato, kjops_pris, stop_loss_pct):
 
 if kjør_knapp:
     with st.spinner('Henter daglige kurser og simulerer...'):
+        # df inneholder data fra start_date til end_date
         df = hent_data(ticker, start_date, end_date)
         
         if df is None:
@@ -119,7 +119,7 @@ if kjør_knapp:
             if best_salgsdato == df.index[-1]:
                 dato_salg = f"{best_salgsdato.strftime('%d.%m.%Y')} (I dag)"
             else:
-                dato_salg = f"{best_salgsdato.strftime('%d.%m.%Y')} (Stop Loss)"
+                dato_salg = f"{best_salgsdato.strftime('%d.%m.%Y')} (Stop Loss utløst)"
 
             # Vi bruker kolonner for å vise dette ryddig
             col1, col2, col3, col4 = st.columns(4)
@@ -141,26 +141,65 @@ if kjør_knapp:
 
             st.markdown("---")
 
-            # --- SEKSJON 2: GRAFER ---
-            plot_data = df[df.index >= optimal_dato].copy()
+            # --- SEKSJON 2: GRAFER (MODIFISERT FOR FULL PERIODE) ---
+            
+            # 1. plot_data skal nå dekke hele den brukerdefinerte perioden (start_date til end_date)
+            plot_data = df.copy() 
+            
+            # 2. Beregn Stop Loss-linjen for HELE perioden, men kun fra optimal_dato
             hoyeste = optimal_pris
             sl_line = []
-            for dato, row in plot_data.iterrows():
-                if row['High'] > hoyeste: hoyeste = row['High']
-                sl_line.append(hoyeste * (1 - (best_sl/100.0)))
+            
+            for dato in plot_data.index:
+                
+                # Før optimal_dato: Stop Loss linjen er ikke relevant (settes til NaN)
+                if dato < optimal_dato:
+                    sl_line.append(np.nan)
+                    continue
+                
+                # På og etter optimal_dato: Beregn Trailing Stop Loss
+                row = plot_data.loc[dato]
+                
+                if row['High'] > hoyeste: 
+                    hoyeste = row['High']
+                    
+                stop_loss_value = hoyeste * (1 - (best_sl/100.0))
+                sl_line.append(stop_loss_value)
+            
             plot_data['Stop Loss Linje'] = sl_line
             
-            if best_salgsdato:
-                plot_data = plot_data[plot_data.index <= best_salgsdato]
-
             res_df = pd.DataFrame(results)
 
             c_graf1, c_graf2 = st.columns(2)
             
             with c_graf1:
-                st.subheader("1. Kursutvikling")
-                st.line_chart(plot_data[['Close', 'Stop Loss Linje']])
-                st.caption("Blå linje er kursen. Rød linje er din Stop Loss.")
+                st.subheader("1. Kursutvikling (Hele perioden)")
+                
+                # Bruker Altair for bedre kontroll over markører
+                base = alt.Chart(plot_data.reset_index()).encode(x='Date:T')
+                
+                # Linje for sluttkurs
+                line_close = base.mark_line(color='#1f77b4').encode(y=alt.Y('Close:Q', title='Kurs (kr)'))
+                
+                # Linje for Trailing Stop Loss
+                line_sl = base.mark_line(color='red', strokeDash=[5,5]).encode(y='Stop Loss Linje:Q')
+                
+                # Markør for kjøp
+                buy_df = pd.DataFrame({'Date': [optimal_dato], 'Price': [optimal_pris]})
+                buy_point = alt.Chart(buy_df).mark_point(color='green', size=150, filled=True, shape='triangle-up').encode(
+                    x='Date:T',
+                    y=alt.Y('Price:Q')
+                )
+                
+                # Markør for salg (utløst Stop Loss eller sluttdato)
+                exit_df = pd.DataFrame({'Date': [best_salgsdato], 'Price': [best_salgspris]})
+                exit_point = alt.Chart(exit_df).mark_point(color='orange', size=150, filled=True).encode(
+                    x='Date:T',
+                    y='Price:Q'
+                )
+
+                st.altair_chart(line_close + line_sl + buy_point + exit_point, use_container_width=True)
+                st.caption("Blå linje: Sluttkurs. Rød stiplet: Stop Loss. Grønn trekant: Kjøpspunkt. Oransje prikk: Salgs-/Exitpunkt.")
             
             with c_graf2:
                 st.subheader("2. Hvilken % fungerer best?")
