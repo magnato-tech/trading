@@ -1,6 +1,8 @@
 streamlit
 pandas
 numpy
-matplotlib
-openpyxl
 yfinance
+requests
+altair
+lxml
+html5lib
